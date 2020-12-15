@@ -11,7 +11,7 @@ CalibExRLidarImu::CalibExRLidarImu()
     imu_buffer_.clear();
 
     // init downsample object
-    downer_.setLeafSize(0.05, 0.05, 0.05);
+    downer_.setLeafSize(0.1, 0.1, 0.1);
 
     // init register object
     register_.reset(new pclomp::NormalDistributionsTransform<PointT, PointT>());
@@ -59,14 +59,18 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
         return;
     }
 
-    // downsample local map for save align time
+    // downsample local map and lidar cloud for save align time
     CloudT::Ptr downed_map(new CloudT);
     downer_.setInputCloud(local_map_);
     downer_.filter(*downed_map);
     local_map_ = downed_map;
 
+    CloudT::Ptr downed_cloud(new CloudT);
+    downer_.setInputCloud(data.cloud);
+    downer_.filter(*downed_cloud);
+
     // get transform between frame and local map
-    register_->setInputSource(data.cloud);
+    register_->setInputSource(downed_cloud);
     register_->setInputTarget(local_map_);
     CloudT::Ptr aligned(new CloudT);
     register_->align(*aligned);
