@@ -4,9 +4,14 @@
 #include <tf/tf.h>
 #include <pcl/io/pcd_io.h>
 
+#define USE_SCAN_2_MAP true
+
 CalibExRLidarImu::CalibExRLidarImu()
 {
     imu_buffer_.clear();
+
+    // init downsample object
+    downer_.setLeafSize(0.05, 0.05, 0.05);
 
     // init register object
     register_.reset(new pclomp::NormalDistributionsTransform<PointT, PointT>());
@@ -33,6 +38,56 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
         return;
     }
 
+    if (!register_)
+    {
+        cout << "register no initialize !!!" << endl;
+        return;
+    }
+
+#if USE_SCAN_2_MAP
+    if (!local_map_)
+    {
+        local_map_.reset(new CloudT);
+        *local_map_ += *(data.cloud);
+
+        LidarFrame frame;
+        frame.stamp = data.stamp;
+        frame.T = Eigen::Matrix4d::Identity();
+        frame.gT = Eigen::Matrix4d::Identity();
+        lidar_buffer_.push_back(move(frame));
+
+        return;
+    }
+
+    // downsample local map for save align time
+    CloudT::Ptr downed_map(new CloudT);
+    downer_.setInputCloud(local_map_);
+    downer_.filter(*downed_map);
+    local_map_ = downed_map;
+
+    // get transform between frame and local map
+    register_->setInputSource(data.cloud);
+    register_->setInputTarget(local_map_);
+    CloudT::Ptr aligned(new CloudT);
+    register_->align(*aligned);
+    if (!register_->hasConverged())
+    {
+        cout << "register cant converge, please check initial value !!!" << endl;
+        return;
+    }
+    Eigen::Matrix4d T_l_m = (register_->getFinalTransformation()).cast<double>();
+
+    // generate lidar frame
+    LidarFrame frame;
+    frame.stamp = data.stamp;
+    frame.gT = T_l_m;
+    Eigen::Matrix4d last_T_l_m = lidar_buffer_.back().gT;
+    frame.T = last_T_l_m.inverse() * T_l_m;
+    lidar_buffer_.push_back(move(frame));
+
+    // update local map
+    *local_map_ += *aligned;
+#else
     // init first lidar frame and set it as zero pose
     if (!last_lidar_cloud_)
     {
@@ -49,13 +104,8 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
     }
 
     // get transform between neighbor frames
-    if (!register_)
-    {
-        cout << "register no initialize !!!" << endl;
-        return;
-    }
-    register_->setInputSource(last_lidar_cloud_);
-    register_->setInputTarget(data.cloud);
+    register_->setInputSource(data.cloud_);
+    register_->setInputTarget(last_lidar_cloud);
     CloudT::Ptr aligned(new CloudT);
     register_->align(*aligned);
 
@@ -80,6 +130,7 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
     // pcl::transformPointCloud(*(data.cloud), *g_cloud, lidar_buffer_.back().gT.cast<float>());
     // string pcd_file = "/home/cn/temp/" + to_string(lidar_buffer_.size()) + ".pcd";
     // pcl::io::savePCDFile(pcd_file, *g_cloud);
+#endif
 }
 
 void CalibExRLidarImu::addImuData(const ImuData &data)
@@ -166,6 +217,9 @@ Eigen::Quaterniond CalibExRLidarImu::solve(const vector<pair<Eigen::Quaterniond,
 
 Eigen::Vector3d CalibExRLidarImu::calib(bool integration)
 {
+    // debug
+    pcl::io::savePCDFile("/home/cn/temp/local_map.pcd", *local_map_);
+
     if (lidar_buffer_.size() == 0 || imu_buffer_.size() == 0)
     {
         cout << "no lidar data or imu data !!!" << endl;

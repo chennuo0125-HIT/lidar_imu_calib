@@ -8,6 +8,7 @@
 #include <iostream>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
+#include <pcl/filters/voxel_grid.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <Eigen/StdVector>
@@ -71,6 +72,9 @@ private:
     CloudT::Ptr last_lidar_cloud_{nullptr}; // last lidar cloud
     vector<LidarFrame> lidar_buffer_;       // record relative transform between neighbor lidar frame
     vector<ImuData> imu_buffer_;            // record raw imu datas
+
+    CloudT::Ptr local_map_{nullptr}; // local map
+    pcl::VoxelGrid<PointT> downer_;  // downsample local map
 
     pclomp::NormalDistributionsTransform<PointT, PointT>::Ptr register_{nullptr}; // register object
 
