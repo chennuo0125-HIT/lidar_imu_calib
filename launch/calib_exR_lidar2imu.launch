@@ -1,0 +1,5 @@
+<launch>
+    <node pkg="auto_scanner" type="calib_exR_lidar2imu_node" name="calib_exR_lidar2imu_node" output="screen">
+        <remap from="/cloud" to="/ns2/rslidar_points"/>
+    </node>
+</launch>
