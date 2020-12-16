@@ -328,6 +328,19 @@ Eigen::Vector3d CalibExRLidarImu::calib(bool integration)
 
     cout << "total lidar buffer size " << lidar_buffer_.size() << ", imu buffer size " << imu_buffer_.size() << endl;
 
+    // integration rotation of imu, when raw imu attitude has big error
+    if (integration)
+    {
+        imu_buffer_[0].rot = Eigen::Quaterniond::Identity();
+        for (int i = 1; i < imu_buffer_.size(); i++)
+        {
+            Eigen::Vector3d bar_gyr = 0.5 * (imu_buffer_[i - 1].gyr + imu_buffer_[i].gyr);
+            Eigen::Vector3d angle_inc = bar_gyr * (imu_buffer_[i].stamp - imu_buffer_[i - 1].stamp);
+            Eigen::Quaterniond rot_inc = Eigen::Quaterniond(1.0, 0.5 * angle_inc[0], 0.5 * angle_inc[1], 0.5 * angle_inc[2]);
+            imu_buffer_[i].rot = imu_buffer_[i - 1].rot * rot_inc;
+        }
+    }
+
     // move invalid lidar frame which got before first imu frame
     auto invalid_lidar_it = lidar_buffer_.begin();
     for (; invalid_lidar_it != lidar_buffer_.end(); invalid_lidar_it++)
