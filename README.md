@@ -22,7 +22,14 @@ when develop slam based on 3D lidar, we often use imu to provide priori for matc
    ```
    lidar_topic: 雷达数据话题名
    imu_topic: imu数据话题名
-   bag_file: 记录的bag数据包
+   bag_file: 记录的bag数据
+   ```
+
+
+3. start
+
+   ```
+   roslaunch lidar_imu_calib calib_exR_lidar2imu.launch
    ```
 
    
