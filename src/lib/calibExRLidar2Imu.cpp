@@ -45,6 +45,11 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
     }
 
 #if USE_SCAN_2_MAP
+    //downsample lidar cloud for save align time
+    CloudT::Ptr downed_cloud(new CloudT);
+    downer_.setInputCloud(data.cloud);
+    downer_.filter(*downed_cloud);
+
     if (!local_map_)
     {
         local_map_.reset(new CloudT);
@@ -54,20 +59,17 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
         frame.stamp = data.stamp;
         frame.T = Eigen::Matrix4d::Identity();
         frame.gT = Eigen::Matrix4d::Identity();
+        frame.cloud = downed_cloud;
         lidar_buffer_.push_back(move(frame));
 
         return;
     }
 
-    // downsample local map and lidar cloud for save align time
+    // downsample local map for save align time
     CloudT::Ptr downed_map(new CloudT);
     downer_.setInputCloud(local_map_);
     downer_.filter(*downed_map);
     local_map_ = downed_map;
-
-    CloudT::Ptr downed_cloud(new CloudT);
-    downer_.setInputCloud(data.cloud);
-    downer_.filter(*downed_cloud);
 
     // get transform between frame and local map
     register_->setInputSource(downed_cloud);
@@ -87,6 +89,7 @@ void CalibExRLidarImu::addLidarData(const LidarData &data)
     frame.gT = T_l_m;
     Eigen::Matrix4d last_T_l_m = lidar_buffer_.back().gT;
     frame.T = last_T_l_m.inverse() * T_l_m;
+    frame.cloud = downed_cloud;
     lidar_buffer_.push_back(move(frame));
 
     // update local map
@@ -189,26 +192,30 @@ Eigen::Quaterniond CalibExRLidarImu::solve(const vector<pair<Eigen::Quaterniond,
     for (int i = 0; i < corres.size(); i++)
     {
         // get relative transform
-        const auto &q_l1_l2 = corres[i].first;
-        const auto &q_b1_b2 = corres[i].second;
+        const auto &q_l2_l1 = corres[i].first;
+        const auto &q_b2_b1 = corres[i].second;
 
         // get left product matrix
-        Eigen::Vector3d q_b1_b2_vec = q_b1_b2.vec();
-        Eigen::Matrix4d left_Q_b1_b2 = Eigen::Matrix4d::Zero();
-        left_Q_b1_b2.block<1, 3>(0, 1) = -q_b1_b2_vec.transpose();
-        left_Q_b1_b2.block<3, 1>(1, 0) = q_b1_b2_vec;
-        left_Q_b1_b2.block<3, 3>(1, 1) = toSkewSymmetric(q_b1_b2_vec);
-        left_Q_b1_b2 += q_b1_b2.w() * Eigen::Matrix4d::Identity();
+        Eigen::Vector3d q_b2_b1_vec = q_b2_b1.vec();
+        Eigen::Matrix4d left_Q_b2_b1 = Eigen::Matrix4d::Zero();
+        left_Q_b2_b1.block<1, 3>(0, 1) = -q_b2_b1_vec.transpose();
+        left_Q_b2_b1.block<3, 1>(1, 0) = q_b2_b1_vec;
+        left_Q_b2_b1.block<3, 3>(1, 1) = toSkewSymmetric(q_b2_b1_vec);
+        left_Q_b2_b1 += q_b2_b1.w() * Eigen::Matrix4d::Identity();
 
         // get right product matrix
-        Eigen::Vector3d q_l1_l2_vec = q_l1_l2.vec();
-        Eigen::Matrix4d right_Q_l1_l2 = Eigen::Matrix4d::Zero();
-        right_Q_l1_l2.block<1, 3>(0, 1) = -q_l1_l2_vec.transpose();
-        right_Q_l1_l2.block<3, 1>(1, 0) = q_l1_l2_vec;
-        right_Q_l1_l2.block<3, 3>(1, 1) = -toSkewSymmetric(q_l1_l2_vec);
-        right_Q_l1_l2 += q_l1_l2.w() * Eigen::Matrix4d::Identity();
+        Eigen::Vector3d q_l2_l1_vec = q_l2_l1.vec();
+        Eigen::Matrix4d right_Q_l2_l1 = Eigen::Matrix4d::Zero();
+        right_Q_l2_l1.block<1, 3>(0, 1) = -q_l2_l1_vec.transpose();
+        right_Q_l2_l1.block<3, 1>(1, 0) = q_l2_l1_vec;
+        right_Q_l2_l1.block<3, 3>(1, 1) = -toSkewSymmetric(q_l2_l1_vec);
+        right_Q_l2_l1 += q_l2_l1.w() * Eigen::Matrix4d::Identity();
 
-        A.block<4, 4>(i * 4, 0) = left_Q_b1_b2 - right_Q_l1_l2;
+        // add loss function
+        double angle_distance = 180.0 / M_PI * q_b2_b1.angularDistance(q_b2_b1);
+        double huber = angle_distance > 5.0 ? 5.0 / angle_distance : 1.0;
+
+        A.block<4, 4>(i * 4, 0) = huber * (left_Q_b2_b1 - right_Q_l2_l1);
     }
 
     // solve homogeneous linear equations by svd method
@@ -219,11 +226,100 @@ Eigen::Quaterniond CalibExRLidarImu::solve(const vector<pair<Eigen::Quaterniond,
     return move(q_l_b);
 }
 
+void CalibExRLidarImu::optimize()
+{
+    if (aligned_lidar_imu_buffer_.size() == 0 || !register_)
+    {
+        cout << "no aligned data or register !!!" << endl;
+        return;
+    }
+
+    // clear local map and initialize
+    if (local_map_)
+        local_map_->clear();
+    else
+        local_map_.reset(new CloudT);
+    *local_map_ += *(aligned_lidar_imu_buffer_[0].first.cloud);
+
+    // use scan2match with estimated initial value to update lidar frame
+    for (int i = 1; i < aligned_lidar_imu_buffer_.size(); i++)
+    {
+        // get front and back frames
+        auto &aligned1 = aligned_lidar_imu_buffer_[i - 1];
+        auto &aligned2 = aligned_lidar_imu_buffer_[i];
+
+        // downsample local map and lidar cloud for save align time
+        CloudT::Ptr downed_map(new CloudT);
+        downer_.setInputCloud(local_map_);
+        downer_.filter(*downed_map);
+        local_map_ = downed_map;
+
+        // calculate estimated T_l_m
+        Eigen::Matrix3d R_l1_m = aligned1.first.gT.block<3, 3>(0, 0);
+        Eigen::Quaterniond q_b1_w = aligned1.second;
+        Eigen::Quaterniond q_b2_w = aligned2.second;
+        Eigen::Quaterniond est_q_b2_b1 = q_b1_w.inverse() * q_b2_w;
+        Eigen::Matrix3d est_R_l2_l1 = Eigen::Matrix3d(q_l_b_.inverse() * est_q_b2_b1 * q_l_b_);
+        Eigen::Matrix3d est_R_l2_m = R_l1_m * est_R_l2_l1;
+        Eigen::Matrix4d est_T_l2_m = Eigen::Matrix4d::Identity();
+        est_T_l2_m.block<3, 3>(0, 0) = est_R_l2_m;
+
+        // register
+        register_->setInputSource(aligned2.first.cloud);
+        register_->setInputTarget(local_map_);
+        CloudT::Ptr aligned(new CloudT);
+        register_->align(*aligned, est_T_l2_m.cast<float>());
+        if (!register_->hasConverged())
+        {
+            cout << "register cant converge, please check initial value !!!" << endl;
+            return;
+        }
+        Eigen::Matrix4d T_l2_m = (register_->getFinalTransformation()).cast<double>();
+
+        // update lidar frame
+        aligned2.first.gT = T_l2_m;
+        Eigen::Matrix4d T_l1_m = aligned1.first.gT;
+        aligned2.first.T = T_l1_m.inverse() * T_l2_m;
+
+        // update local map
+        *local_map_ += *aligned;
+    }
+
+    // generate constraints
+    vector<pair<Eigen::Quaterniond, Eigen::Quaterniond>> corres;
+    for (int i = 1; i < aligned_lidar_imu_buffer_.size(); i++)
+    {
+        // get neighbor frame
+        const auto &aligned1 = aligned_lidar_imu_buffer_[i - 1];
+        const auto &aligned2 = aligned_lidar_imu_buffer_[i];
+
+        // calculate relative transform between neighbor lidar
+        Eigen::Quaterniond q_l2_l1 = Eigen::Quaterniond(aligned2.first.T.block<3, 3>(0, 0));
+
+        // calculate relative transform between neighbor interpolated imu
+        Eigen::Quaterniond q_b1_w = aligned1.second;
+        Eigen::Quaterniond q_b2_w = aligned2.second;
+        Eigen::Quaterniond q_b2_b1 = q_b1_w.inverse() * q_b2_w;
+
+        corres.push_back(move(pair<Eigen::Quaterniond, Eigen::Quaterniond>(q_l2_l1, q_b2_b1)));
+        corres2_ = corres;
+    }
+
+    Eigen::Quaterniond result = solve(corres);
+    result.normalize();
+
+    // check whether optimize fail
+    double angle = fabs(q_l_b_.angularDistance(result));
+    if (angle > 0.5236)
+    {
+        cout << "the difference between before and after optimze is " << angle << " which greater than given threshold 0.5236 !!!" << endl;
+        return;
+    }
+    q_l_b_ = result;
+}
+
 Eigen::Vector3d CalibExRLidarImu::calib(bool integration)
 {
-    // debug
-    pcl::io::savePCDFile("/home/cn/temp/local_map.pcd", *local_map_);
-
     if (lidar_buffer_.size() == 0 || imu_buffer_.size() == 0)
     {
         cout << "no lidar data or imu data !!!" << endl;
@@ -247,66 +343,63 @@ Eigen::Vector3d CalibExRLidarImu::calib(bool integration)
         return move(Eigen::Vector3d(0.0, 0.0, 0.0));
     }
 
-    // get last imu frame which before first lidar frame
-    auto last_imu_it = imu_buffer_.begin();
-    for (; last_imu_it != imu_buffer_.end(); last_imu_it++)
-    {
-        if (last_imu_it->stamp >= lidar_buffer_[0].stamp)
-            break;
-    }
-    if (last_imu_it != imu_buffer_.begin())
-        last_imu_it--;
-
     // get time-aligned lidar odometry rotation and imu integration rotation
-    vector<pair<Eigen::Quaterniond, Eigen::Quaterniond>> corres(0);
-    for (int ei = 1; ei < lidar_buffer_.size(); ei++)
+    auto last_imu_it = imu_buffer_.begin();
+    for (int i = 0; i < lidar_buffer_.size(); i++)
     {
-        // get left lidar and right lidar information
-        int si = ei - 1;
-        const auto &left_lidar = lidar_buffer_[si];
-        const auto &right_lidar = lidar_buffer_[ei];
+        // get lidar information
+        const auto &lidar_frame = lidar_buffer_[i];
 
-        // get interpolated imu attitude at left lidar stamp
-        auto left_imu_it1 = last_imu_it;
-        auto left_imu_it2 = last_imu_it + 1;
-        if (imu_buffer_.end() == left_imu_it2)
-            break;
-        assert(left_imu_it2->stamp >= left_lidar.stamp || left_imu_it1->stamp < left_imu_it2->stamp); // this shouldnt happen
-        Eigen::Quaterniond left_q_i1_w = left_imu_it1->rot;
-        Eigen::Quaterniond left_q_i2_w = left_imu_it2->rot;
-        double left_scale = (left_lidar.stamp - left_imu_it1->stamp) / (left_imu_it2->stamp - left_imu_it1->stamp);
-        Eigen::Quaterniond left_q_inter_w = getInterpolatedAttitude(left_q_i1_w, left_q_i2_w, left_scale);
-
-        // get interpolated imu attitude at right lidar stamp
-        last_imu_it = imu_buffer_.begin();
+        // get last imu frame which before current lidar frame
         for (; last_imu_it != imu_buffer_.end(); last_imu_it++)
         {
-            if (last_imu_it->stamp >= right_lidar.stamp)
+            if (last_imu_it->stamp >= lidar_frame.stamp)
                 break;
         }
         if (last_imu_it != imu_buffer_.begin())
             last_imu_it--;
-        auto right_imu_it1 = last_imu_it;
-        auto right_imu_it2 = last_imu_it + 1;
-        if (imu_buffer_.end() == right_imu_it2)
-            break;
-        assert(right_imu_it2->stamp >= right_lidar.stamp || right_imu_it1->stamp < right_imu_it2->stamp);
-        Eigen::Quaterniond right_q_i1_w = right_imu_it1->rot;
-        Eigen::Quaterniond right_q_i2_w = right_imu_it2->rot;
-        double right_scale = (right_lidar.stamp - right_imu_it1->stamp) / (right_imu_it2->stamp - right_imu_it1->stamp);
-        Eigen::Quaterniond right_q_inter_w = getInterpolatedAttitude(right_q_i1_w, right_q_i2_w, right_scale);
 
-        // get relative transform between interpolated imu attitudes at left and right lidar stamp
-        Eigen::Quaterniond imu_q_right_left = left_q_inter_w.inverse() * right_q_inter_w;
-        Eigen::Quaterniond lidar_q_right_left(right_lidar.T.block<3, 3>(0, 0));
-        imu_q_right_left.normalize();
-        lidar_q_right_left.normalize();
-        corres.push_back(move(pair<Eigen::Quaterniond, Eigen::Quaterniond>(lidar_q_right_left, imu_q_right_left)));
+        // get interpolated imu attitude at lidar stamp
+        auto imu_it1 = last_imu_it;
+        auto imu_it2 = last_imu_it + 1;
+        if (imu_buffer_.end() == imu_it2)
+            break;
+        assert(imu_it2->stamp >= lidar_frame.stamp || imu_it1->stamp < imu_it2->stamp); // this shouldnt happen
+        Eigen::Quaterniond q_b1_w = imu_it1->rot;
+        Eigen::Quaterniond q_b2_w = imu_it2->rot;
+        double scale = (lidar_frame.stamp - imu_it1->stamp) / (imu_it2->stamp - imu_it1->stamp);
+        Eigen::Quaterniond q_inter_w = getInterpolatedAttitude(q_b1_w, q_b2_w, scale);
+
+        // buffer aligned information
+        aligned_lidar_imu_buffer_.push_back(move(pair<LidarFrame, Eigen::Quaterniond>(lidar_frame, q_inter_w)));
     }
 
+    // solve initial transform between lidar and imu
+    vector<pair<Eigen::Quaterniond, Eigen::Quaterniond>> corres(0);
+    for (int i = 1; i < aligned_lidar_imu_buffer_.size(); i++)
+    {
+        // get neighbor aligned frame
+        const auto &aligned1 = aligned_lidar_imu_buffer_[i - 1];
+        const auto &aligned2 = aligned_lidar_imu_buffer_[i];
+
+        // get initial relative transform between neighbor lidar
+        Eigen::Quaterniond q_l2_l1 = Eigen::Quaterniond(aligned_lidar_imu_buffer_[i].first.T.block<3, 3>(0, 0));
+
+        // calculate relative transform between neighbor interpolated imu
+        Eigen::Quaterniond q_b1_w = aligned1.second;
+        Eigen::Quaterniond q_b2_w = aligned2.second;
+        Eigen::Quaterniond q_b2_b1 = q_b1_w.inverse() * q_b2_w;
+
+        corres.push_back(move(pair<Eigen::Quaterniond, Eigen::Quaterniond>(q_l2_l1, q_b2_b1)));
+        corres1_ = corres;
+    }
+    q_l_b_ = solve(corres);
+
+    // optimize: use initial result to estimate transform between neighbor lidar frame for improving matching precise
+    optimize();
+
     // get result
-    Eigen::Quaterniond q_l_b = solve(corres);
-    tf::Matrix3x3 mat(tf::Quaternion(q_l_b.x(), q_l_b.y(), q_l_b.z(), q_l_b.w()));
+    tf::Matrix3x3 mat(tf::Quaternion(q_l_b_.x(), q_l_b_.y(), q_l_b_.z(), q_l_b_.w()));
     double roll, pitch, yaw;
     mat.getRPY(roll, pitch, yaw);
 

@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   sensor_msgs
   tf
+  rosbag
 )
 
 find_package(cmake_modules REQUIRED)
