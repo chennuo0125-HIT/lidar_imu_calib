@@ -31,5 +31,6 @@ when develop slam based on 3D lidar, we often use imu to provide priori for matc
    ```
    roslaunch lidar_imu_calib calib_exR_lidar2imu.launch
    ```
-
+### reference
+[https://blog.csdn.net/weixin_37835423/article/details/110672571](https://blog.csdn.net/weixin_37835423/article/details/110672571)
    
