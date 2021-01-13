@@ -29,9 +29,9 @@ sudo make install
 2. config launch file
 
    ```
-   lidar_topic: 雷达数据话题名
-   imu_topic: imu数据话题名
-   bag_file: 记录的bag数据
+   lidar_topic: lidar data topic name
+   imu_topic: imu data topic name
+   bag_file: *.bag file record imu and lidar data topic
    ```
 
 
