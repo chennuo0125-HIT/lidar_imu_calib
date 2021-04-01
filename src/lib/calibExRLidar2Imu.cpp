@@ -213,7 +213,7 @@ Eigen::Quaterniond CalibExRLidarImu::solve(const vector<pair<Eigen::Quaterniond,
 
         // add loss function
         double angle_distance = 180.0 / M_PI * q_b2_b1.angularDistance(q_l2_l1);
-        double huber = angle_distance > 5.0 ? 5.0 / angle_distance : 1.0;
+        double huber = angle_distance > 2.0 ? 2.0 / angle_distance : 1.0;
 
         A.block<4, 4>(i * 4, 0) = huber * (left_Q_b2_b1 - right_Q_l2_l1);
     }
