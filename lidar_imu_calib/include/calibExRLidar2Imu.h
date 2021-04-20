@@ -12,7 +12,8 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <Eigen/StdVector>
-#include <pclomp/ndt_omp.h>
+
+#include "../../ndt_omp/include/pclomp/ndt_omp.h"
 
 using namespace std;
 using PointT = pcl::PointXYZI;

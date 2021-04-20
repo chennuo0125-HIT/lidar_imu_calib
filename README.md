@@ -7,18 +7,15 @@ when develop slam based on 3D lidar, we often use imu to provide priori for matc
 ### prerequisite
 
 - [ROS](http://wiki.ros.org/kinetic/Installation/Ubuntu)
-- [ndt_omp](https://github.com/koide3/ndt_omp)
-### install ndt_omp to system catalog
+### compile
 ```
-git clone https://github.com/koide3/ndt_omp.git
-cd ndt_omp
-mkdir build
-cd build
-cmake ..
-make
-sudo make install
+mkdir -p catkin_ws/src
+cd catkin_ws/src
+git clone https://github.com/chennuo0125-HIT/lidar_imu_calib.git
+cd ..
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ndt_omp;lidar_imu_calib"
 ```
-### step
+### run step
 
 1. use rosbag tool record imu and lidar data
 
